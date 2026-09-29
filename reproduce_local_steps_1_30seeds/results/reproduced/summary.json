@@ -1,0 +1,50 @@
+{
+  "checks": {
+    "attacker_decisions": true,
+    "honest_decisions": true,
+    "runs": true
+  },
+  "cosine": {
+    "attacker_max": 0.027482910055144402,
+    "attacker_mean": -0.0002673677451349084,
+    "attacker_min": -0.02856591029199386,
+    "attacker_std_population": 0.010238495795260311,
+    "honest_max": 0.7347541591361239,
+    "honest_mean": 0.4456918805018053,
+    "honest_min": -0.04828290454087777,
+    "honest_std_population": 0.11414336979739352
+  },
+  "decision_counts": {
+    "FN": 0,
+    "FP": 1,
+    "TN": 749,
+    "TP": 750
+  },
+  "fixed_protocol": {
+    "attack_start_paper_round": 5,
+    "attackers": 25,
+    "batch_size": 64,
+    "clients": 50,
+    "dataset": "MNIST",
+    "honest_clients": 25,
+    "learning_rate": 0.1,
+    "local_steps": 1,
+    "model": "Logistic Regression",
+    "optimizer": "SGD",
+    "partition": "IID",
+    "reference_paper_round": 6,
+    "threshold": 0.1,
+    "validation_paper_round": 8,
+    "validation_probe_input": "saved_theta_r_plus_1",
+    "validation_probe_observation_only": true
+  },
+  "pooled_metrics": {
+    "DSR": 1.0,
+    "F1": 0.9993337774816788,
+    "FPR": 0.0013333333333333333,
+    "Precision": 0.9986684420772304
+  },
+  "run_count": 30,
+  "seed_rule": "seed = 20260915 + run_id, run_id = 0,...,29",
+  "study": "Fixed local_steps=1, 30-seed reproduction unit."
+}
