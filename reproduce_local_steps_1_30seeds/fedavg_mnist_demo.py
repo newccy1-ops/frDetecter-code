@@ -60,7 +60,7 @@ class DemoConfig:
     attack_direction_distribution: str = "standard_gaussian_normalized"
     attack_norm_source_paper_round: int = 4
     reference_paper_round: int = 6  # Paper experiment setting; explicit 1-based paper-round numbering.
-    validation_paper_round: int = 8  # DEMO_ASSUMPTION: reproducible probe round; not a paper-fixed parameter.
+    validation_paper_round: int = 7  # Revised manuscript: validation is r+1, immediately after reference round 6.
     cosine_epsilon: float = 1e-12  # DEMO_ASSUMPTION: numerical nonzero-norm guard, not a detector value.
     # DEMO_ASSUMPTION: the validation probe is observation-only and does not modify the main FL trajectory.
     validation_probe_observation_only: bool = True
@@ -826,6 +826,8 @@ def run_smoke_test(config: DemoConfig, evaluate_round_metrics: bool = True) -> d
     reference_updates: dict[int, Tensor] = {}
     reference_honest_training_audit: list[dict[str, int]] = []
     validation_main_start_model: dict[str, Tensor] | None = None
+    client_cosines = validation_audit = training_transcripts = None
+    main_trajectory_unchanged_by_probe = False
     rounds: list[dict] = []
 
     for paper_round in range(1, config.communication_rounds + 1):
@@ -834,8 +836,32 @@ def run_smoke_test(config: DemoConfig, evaluate_round_metrics: bool = True) -> d
             # theta_r: server model on entry to paper round 6.
             reference_input_model = clone_state(global_state)
         if paper_round == config.validation_paper_round:
-            # This is recorded only to prove the probe does not use the main-trajectory input at its validation round.
+            # Issue the challenge BEFORE this round's regular training uses the
+            # model. At r+1, the saved snapshot equals the main entry model;
+            # snapshot provenance, not inequality, is the required invariant.
             validation_main_start_model = clone_state(global_state)
+            if reference_model is None or attack_update_norm is None:
+                raise AssertionError("Reference snapshot must exist before validation.")
+            adjacent = paper_round == config.reference_paper_round + 1
+            if adjacent and not states_identical(reference_model, global_state):
+                raise AssertionError("Adjacent validation must start from post-reference FedAvg.")
+            before_probe = clone_state(global_state)
+            client_cosines, validation_audit, training_transcripts = run_validation_probe(
+                reference_model, client_subsets, attacker_id_set, attack_update_norm,
+                reference_updates, reference_honest_training_audit, config,
+            )
+            main_trajectory_unchanged_by_probe = states_identical(before_probe, global_state)
+            if not main_trajectory_unchanged_by_probe:
+                raise AssertionError("Observation-only validation probe changed the main FL trajectory.")
+            validation_audit.update({
+                "probe_execution_paper_round": paper_round,
+                "probe_executed_before_validation_round_regular_training": True,
+                "regular_rounds_using_saved_model_before_probe": paper_round - config.reference_paper_round - 1,
+                "validation_is_immediately_after_reference": adjacent,
+                "probe_before_any_regular_subsequent_round": adjacent,
+                "validation_main_start_model_hash": sha256_state(validation_main_start_model),
+                "post_reference_model_hash": sha256_state(reference_model),
+            })
         local_states, sample_counts, genuine_norms, attacker_norms = [], [], [], []
         real_train_calls = attacker_local_train_calls = attacker_attack_calls = 0
         for client_index in range(config.num_clients):
@@ -932,14 +958,8 @@ def run_smoke_test(config: DemoConfig, evaluate_round_metrics: bool = True) -> d
     if attack_update_norm is None:
         raise AssertionError("Attack-update norm was not frozen before the validation probe.")
 
-    # The regular round-8 FedAvg flow is complete before this separate observation-only probe starts.
-    main_trajectory_before_probe = clone_state(global_state)
-    client_cosines, validation_audit, training_transcripts = run_validation_probe(
-        reference_model, client_subsets, attacker_id_set, attack_update_norm, reference_updates, reference_honest_training_audit, config
-    )
-    main_trajectory_unchanged_by_probe = states_identical(main_trajectory_before_probe, global_state)
-    if not main_trajectory_unchanged_by_probe:
-        raise AssertionError("Observation-only validation probe changed the main FL trajectory.")
+    if client_cosines is None or validation_audit is None or training_transcripts is None:
+        raise AssertionError("Validation probe was not executed at the configured paper round.")
     if not validation_audit["all_50_clients_have_cosine"]:
         raise AssertionError(f"Undefined cosine values: {validation_audit['undefined_cosine_client_ids']}")
 
@@ -985,8 +1005,7 @@ def run_smoke_test(config: DemoConfig, evaluate_round_metrics: bool = True) -> d
             **validation_audit,
             "probe_input_is_saved_theta_r_plus_1": True,
             "probe_input_is_not_validation_round_main_start_model": not states_identical(reference_model, validation_main_start_model),
-            # Retained for the already-completed round-8 single-run artifact schema.
-            "probe_input_is_not_round_8_main_start_model": not states_identical(reference_model, validation_main_start_model),
+            "probe_input_matches_validation_round_main_start_model": states_identical(reference_model, validation_main_start_model),
             "main_fl_trajectory_unchanged_by_probe": main_trajectory_unchanged_by_probe,
             "probe_is_observation_only": config.validation_probe_observation_only,
         },

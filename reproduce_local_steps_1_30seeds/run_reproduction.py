@@ -1,7 +1,7 @@
-"""Exact 30-seed reproduction unit for the local_steps=1 result.
+"""30-seed local_steps=1 unit, corrected to adjacent validation round 7.
 
 This unit fixes every protocol setting to the previously audited MNIST
-functional Demo except for the run seed.  It deliberately does not sweep
+functional Demo after the documented round-8 to round-7 correction. It does not sweep
 other local-step counts or tune any parameter.
 """
 
@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import math
 import os
 import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
 from statistics import fmean, pstdev
+import sys
 
 from fedavg_mnist_demo import DemoConfig, run_smoke_test
 
@@ -25,7 +28,7 @@ BASE_SEED = 20260915
 LOCAL_STEPS = 1
 UNIT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_ROOT = UNIT_ROOT.parent / "data"
-RESULTS_ROOT = UNIT_ROOT / "results" / "reproduced"
+RESULTS_ROOT = UNIT_ROOT / "results" / "validation_round_7"
 
 RUN_FIELDS = [
     "run_id", "seed", "honest_cosine_min", "honest_cosine_max",
@@ -50,7 +53,7 @@ def _check_config(config: DemoConfig) -> None:
         config.local_steps == LOCAL_STEPS
         and config.communication_rounds == 8
         and config.reference_paper_round == 6
-        and config.validation_paper_round == 8
+        and config.validation_paper_round == 7
         and config.batch_size == 64
         and config.learning_rate == 0.10
     ):
@@ -73,10 +76,13 @@ def _worker(run_id: int, data_root: str, temp_root: str) -> tuple[int, dict]:
     if not (
         reference["reference_paper_round"] == 6
         and reference["theta_r_plus_1_is_post_reference_fedavg_model"]
-        and validation["validation_paper_round"] == 8
+        and validation["validation_paper_round"] == 7
         and validation["probe_base_model"] == "saved_theta_r_plus_1"
         and validation["probe_is_observation_only"]
         and validation["main_fl_trajectory_unchanged_by_probe"]
+        and validation["validation_is_immediately_after_reference"]
+        and validation["probe_executed_before_validation_round_regular_training"]
+        and validation["probe_input_matches_validation_round_main_start_model"]
     ):
         raise AssertionError("Reference/validation semantic audit failed")
 
@@ -158,6 +164,8 @@ def main() -> None:
     all_honest = [float(record["cosine_similarity"]) for report in reports.values() for record in report["client_cosines"] if record["role"] == "honest"]
     all_attackers = [float(record["cosine_similarity"]) for report in reports.values() for record in report["client_cosines"] if record["role"] == "attacker"]
     summary = {
+        "status": "PASS",
+        "reported_stage": "Stage 1 only; existing functional-helper verdicts are not used; no ZKP executed",
         "study": "Fixed local_steps=1, 30-seed reproduction unit.",
         "seed_rule": "seed = 20260915 + run_id, run_id = 0,...,29",
         "fixed_protocol": {
@@ -165,7 +173,7 @@ def main() -> None:
             "honest_clients": 25, "attackers": 25, "partition": "IID",
             "local_steps": 1, "batch_size": 64, "optimizer": "SGD",
             "learning_rate": 0.10, "attack_start_paper_round": 5,
-            "reference_paper_round": 6, "validation_paper_round": 8,
+            "communication_rounds": 8, "reference_paper_round": 6, "validation_paper_round": 7,
             "validation_probe_input": "saved_theta_r_plus_1",
             "validation_probe_observation_only": True, "threshold": 0.1,
         },
@@ -185,6 +193,52 @@ def main() -> None:
         },
         "checks": {"runs": len(rows) == 30, "honest_decisions": len(all_honest) == 750, "attacker_decisions": len(all_attackers) == 750},
     }
+    # Persist actual Stage-1 evidence before temporary per-run files disappear.
+    # Logging only: no training, attack, cosine, or classification changes.
+    client_fields = ["run_id", "seed", "client_id", "role", "cosine_similarity",
+                     "reference_update_norm", "validation_update_norm", "validation_update_hash",
+                     "threshold", "suspicious", "ground_truth_positive", "classification_result"]
+    clients = []
+    run_audits = []
+    for run_id in range(RUNS):
+        report = reports[run_id]
+        seed = BASE_SEED + run_id
+        for record in report["client_cosines"]:
+            entry = {"run_id": run_id, "seed": seed, **{key: record[key] for key in client_fields[2:]}}
+            if not math.isfinite(entry["cosine_similarity"]):
+                raise AssertionError("Non-finite Stage-1 cosine")
+            clients.append(entry)
+        run_audits.append({"run_id": run_id, "seed": seed, "config": report["config"],
+                           "attacker_ids": report["attacker_ids"],
+                           "partition_check": report["partition_check"],
+                           "reference_round_audit": report["reference_round_audit"],
+                           "validation_probe_audit": report["validation_probe_audit"],
+                           "all_rounds_aggregate_all_50_uploads": report["all_rounds_aggregate_all_50_uploads"],
+                           "attack_audit_passed": report["attack_audit_passed"],
+                           "rounds": report["rounds"],
+                           "first_stage_metrics": report["first_stage_metrics"]})
+    assert len(clients) == 1500
+    assert len({(item["run_id"], item["client_id"]) for item in clients}) == 1500
+    assert all(sum(item["classification_result"] == key for item in clients) == pooled[key]
+               for key in ("TP", "FP", "TN", "FN"))
+    summary["false_positives"] = [x for x in clients if x["classification_result"] == "FP"]
+    summary["false_negatives"] = [x for x in clients if x["classification_result"] == "FN"]
+    summary["runs_with_FP"] = sum(row["FP"] > 0 for row in rows)
+    summary["runs_with_FN"] = sum(row["FN"] > 0 for row in rows)
+    summary["macro_metrics"] = {key: {"mean": fmean(row[key] for row in rows),
+                                      "std_population": pstdev(row[key] for row in rows)}
+                                for key in ("DSR", "FPR", "Precision", "F1")}
+    summary["checks"]["client_decisions_1500_unique"] = True
+    summary["checks"]["client_level_confusion_matches_pooled"] = True
+    summary["source_sha256"] = {name: hashlib.sha256((UNIT_ROOT / name).read_bytes()).hexdigest()
+                                for name in ("fedavg_mnist_demo.py", "run_reproduction.py", "torch_runtime_compat.py")}
+    summary["execution"] = {"python": sys.version, "executable": sys.executable,
+                             "workers": args.workers, "per_round_accuracy_evaluation": False}
+    with (RESULTS_ROOT / "client_level.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=client_fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(clients)
+    (RESULTS_ROOT / "run_audits.json").write_text(json.dumps(run_audits, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     _write_csv(RESULTS_ROOT / "per_run.csv", rows)
     (RESULTS_ROOT / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"PASS: wrote {RESULTS_ROOT}")
