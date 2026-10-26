@@ -9,6 +9,16 @@
 **/cache/
 **/work/
 **/node_modules/
+**/dependencies/
+**/build/
+*.class
+*.jar
+*.exe
+*.dll
+*.o
+*.obj
+*.a
+*.bin
 **/__pycache__/
 *.py[cod]
 *.log

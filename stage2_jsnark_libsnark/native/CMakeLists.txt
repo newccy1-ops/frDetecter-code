@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.16)
+project(frdetecter_jsnark_backend LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 11)
+set(JSNARK "${CMAKE_CURRENT_SOURCE_DIR}/../dependencies/jsnark" CACHE PATH "Pinned jsnark checkout")
+set(SNARK "${JSNARK}/libsnark")
+set(FF "${SNARK}/depends/libff")
+set(FQFFT "${SNARK}/depends/libfqfft")
+# Build the same upstream libraries, but only the curve and gadgetlib2 sources
+# needed by this backend. No changes to upstream cryptographic algorithms.
+# Avoid unrelated Boost/program_options demos and Linux procps profiling.
+add_compile_definitions(CURVE_ALT_BN128 NO_PROCPS NO_PT_COMPRESSION)
+add_compile_options(-O2 -Wno-deprecated-declarations)
+include_directories("${SNARK}" "${FF}" "${FQFFT}" "${SNARK}/libsnark/jsnark_interface")
+file(GLOB FF_CURVE "${FF}/libff/algebra/curves/alt_bn128/*.cpp")
+add_library(ff STATIC ${FF_CURVE} "${FF}/libff/common/double.cpp" "${FF}/libff/common/profiling.cpp" "${FF}/libff/common/utils.cpp")
+target_link_libraries(ff PUBLIC gmp gmpxx crypto)
+file(GLOB GADGETLIB2 "${SNARK}/libsnark/gadgetlib2/*.cpp")
+add_library(snark STATIC ${GADGETLIB2})
+target_link_libraries(snark PUBLIC ff)
+add_executable(fr_backend backend.cpp "${SNARK}/libsnark/jsnark_interface/CircuitReader.cpp" "${SNARK}/libsnark/jsnark_interface/Util.cpp")
+target_link_libraries(fr_backend PRIVATE snark ff gmpxx gmp crypto)

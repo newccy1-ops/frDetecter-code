@@ -1,15 +1,16 @@
-# frDetecter: reproducible Stage-1 + single-client ZKP demos
+# frDetecter: Stage 1 + Java/jsnark/libsnark Stage 2
 
-本仓库只保留源码、依赖锁及说明，**不包含实验结果、模型、MNIST、proof、密钥、
-witness、编译输出或node_modules**。运行会重新生成所需数据和证据，不依赖作者
-电脑中的目录、已有results或历史证明。
+源码发布：不包含实验结果、MNIST、模型、证明、密钥、witness、node_modules、
+下载的第三方工具或构建产物。运行时在本机生成这些文件，Git 默认忽略。
 
-## 1. 环境
+默认 Stage 2 已切换到 **Java/jsnark + libsnark**；原有 Circom/snarkjs 版本保留
+在 `stage2_zkp_single_client/`，不是新后端的证明生成/验证工具。
 
-已实际使用：Windows、Python **3.12.4**、PyTorch **2.12.1+cpu**、torchvision
-**0.27.1+cpu**、NumPy **1.26.4**、Node.js **24.15.0**、npm **11.12.1**。
-建议使用相同版本复现；其他平台/版本不保证浮点结果逐位相同。
-Windows需可用的Microsoft VC++运行库；所带兼容层只预加载系统DLL，不替换系统/Conda文件。
+## 1. 安装
+
+已使用环境：Windows，Python 3.12.4，PyTorch 2.12.1+cpu，torchvision 0.27.1+cpu，
+NumPy 1.26.4，Node.js 24.15.0，npm 11.12.1，JDK 17。需要 Git 在 PATH 中。
+其他硬件/平台/库版本不保证浮点结果逐位相同。Windows 需 Microsoft VC++ 运行库。
 
 ```powershell
 git clone https://github.com/newccy1-ops/frDetecter-code.git
@@ -18,116 +19,113 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 npm --prefix stage2_zkp_single_client ci --no-audit --no-fund
+python stage2_jsnark_libsnark/bootstrap_sources.py
+powershell -NoProfile -ExecutionPolicy Bypass -File stage2_jsnark_libsnark/bootstrap_msys2.ps1 -InstallPackages
 ```
 
-不要安装未锁定的最新版库来追求结果一致。Python版本不符时先准备Python3.12；
-Node/npm也应在PATH中。首次MNIST下载、Circom下载和约2.4GB公开CRS下载需要网络。
-公开工具/CRS按固定SHA-256/BLAKE2b校验，校验失败即停止，绝不关闭TLS校验。
+Node 依赖沿用锁定的包，仅复用 Poseidon 编码/常量；新后端不调用 Circom/snarkjs
+生成或验证证明，也不下载旧后端的公开 CRS。首次需要网络下载 MNIST 和固定工具源码。
+不会关闭 TLS 验证。新版原生后端每次运行会自动检查依赖版本并构建。
 
-## 2. Stage 1：30个seed重新训练并计算检测结果
+Linux 需自行安装 GCC、CMake、GMP/OpenSSL 开发库、JDK、Git、Node 和 Python依赖，
+省略 MSYS2 命令；Windows 是已测试平台。
+
+## 2. Stage 1
+
+30 个 seed，`seed = 20260915 + run_id`，run_id=0..29：
 
 ```powershell
-python run_demo.py stage1
+python run_demo.py stage1 --workers 4
 ```
 
-并行度只影响资源占用，可用 `--workers 1`。也可用
-`--data-root "D:\MNIST-cache"` 指定缓存；没有缓存时自动下载，样本内容不改变。
-30个seed为`20260915 + run_id`，run_id=0..29。
+生成 `reproduce_local_steps_1_30seeds/results/validation_round_7/` 下的统计、
+逐客户端结果和审计记录。可指定 `--data-root "D:\MNIST-cache"`；
+没有缓存时自动下载。并行度只改变资源占用，不改变实验规则。
 
-| 冻结设置 | 数值/规则 |
+| 设置 | 冻结内容 |
 | --- | --- |
-| 数据/模型 | MNIST，训练60000/测试10000；Linear(784,10)，共7850参数 |
-| 客户端 | 50，IID无放回均分，每人1200样本；25honest+25固定随机选中的attackers |
-| 参与和聚合 | 每轮50人全部参与；按本地样本数加权FedAvg，不排除attacker |
-| 本地训练 | 每次1个minibatch，batch64，SGD，lr0.10 |
-| 攻击 | 第5轮开始跳过攻击者本地训练；高斯随机方向归一化；范数为第4轮真实更新范数中位数 |
-| 总通信轮 | 8（DEMO_ASSUMPTION，不是论文明确总轮数） |
-| Reference/validation | 6/7；probe从第6轮聚合模型出发，在第7轮常规训练之前执行 |
-| Stage-1规则 | cosine < 0.1 标记suspicious；等于0.1不标记 |
+| 数据集/模型 | MNIST，训练60000/测试10000；Linear(784,10)，7850参数 |
+| 客户端 | 50；IID无放回均分，每客户端1200样本 |
+| 身份 | 每个seed固定选择25个low-resource attackers，另25个honest |
+| 训练/聚合 | 每轮50人全部参与；按本地样本数加权FedAvg，不剔除attacker |
+| 本地训练 | local_steps=1，batch64，SGD，lr0.10 |
+| 攻击 | 第5轮起跳过训练；归一化高斯随机方向；范数为第4轮真实更新范数中位数 |
+| 轮次 | 总8轮，reference=6，validation=7 |
+| Probe | 从保存的第6轮聚合模型出发，在第7轮常规训练前执行 |
+| Stage 1 | cosine < 0.1 标记suspicious；严格小于 |
 
-客户端划分、local steps/batch/optimizer/lr、seed、全参与、攻击分布和尺度、
-数值零范数保护及训练长度均为工程假设，不伪装成原稿参数。0.1也是原稿最小Demo
-中的工程阈值；此发布不声称已重现论文数值表格。
+上述 IID、全参与、本地超参数、seed、随机攻击分布/尺度、总轮数、数值实现和阈值
+均含 DEMO_ASSUMPTION，不伪称来自原稿。不以论文 Table V 为校准目标。
+`observation-only` 仅表示 probe 不进入 FedAvg、不改变主训练轨迹，**不表示没有
+Stage 2**。Stage-1 模拟中旧 functional-helper 的结论不计为真实 ZKP 结果。
 
-`observation-only` **仅表示probe不参与FedAvg、不改变主训练轨迹**，不表示Stage 2
-不生成/验证证明。共享Stage-1模拟内部保留旧functional-helper，其结论不作为
-真实ZKP、Stage-2结果或完整两阶段指标。
+## 3. Stage 2 与 Stage 1 串联
 
-输出在`reproduce_local_steps_1_30seeds/results/validation_round_7/`：
-`summary.json`、`per_run.csv`、`client_level.csv`、`run_audits.json`，均为新生成且gitignored。
-每轮全数据集准确率评估被省略以降低成本，不改变训练、cosine或检测。
-
-相同已测环境下的预期核对值（仅作复现验收，不作为计算输入）：
-
-- 750次honest、750次attacker判定；TP=750、FP=3、TN=747、FN=0。
-- Pooled DSR=100%，FPR=0.4%，Precision=99.6015936%，F1=99.8003992%。
-- Honest cosine mean约0.4446133960；attacker约0.0013150833。
-- Pooled与逐run指标平均分别输出，不能混用。
-
-## 3. Stage 2：真实ZKP，不是transcript检查
-
-默认证明首个自然误报案例：
+独立运行一个已识别的诚实误报案例；先执行其 Stage 1 捕获实际输入，再生成真实证明：
 
 ```powershell
-python run_demo.py stage2
+python run_demo.py stage2 --seed 20260923 --client-id 30
 ```
 
-重新运行三个已识别的honest误报案例（顺序执行，避免内存叠加）：
+另外两个案例为 `20260925 / client1` 和 `20260938 / client26`。
+顺序运行三个案例，或从30-seed Stage 1开始一键串联：
 
 ```powershell
 python run_demo.py stage2 --all-cases
+python run_demo.py all --workers 4
 ```
 
-也可以单独运行一个：
+`all` 是30-seed Stage 1 + 三个选定honest FP的 Stage 2，**不是全体suspicious**。
+Stage 2 检查实际客户端是否suspicious；有当前Stage-1 summary时，还必须精确匹配
+cosine和原始上传update的哈希。没有summary也可自行运行，不依赖仓库中的旧结果。
+
+如需先保存一个 Stage 1 输入，之后 Stage 2 不再训练，使用：
 
 ```powershell
-python run_demo.py stage2 --seed 20260925 --client-id 1
-python run_demo.py stage2 --seed 20260938 --client-id 26
+python run_demo.py stage1-case --seed 20260923 --client-id 30
+# 将下面路径替换为上一条打印的 STAGE1_CASE_DIR
+python run_demo.py stage2 --seed 20260923 --client-id 30 --case-dir "<STAGE1_CASE_DIR>"
 ```
 
-先跑Stage 1再跑这三个案例的一键命令：
+`stage1-case` 实际运行该seed的50客户端完整协议，只捕获指定honest suspicious客户端。
+它不生成ZKP。后续 `--case-dir` 只导入其模型、真实batch、原始upload和元数据，
+校验字节/tensor哈希，重新生成密钥、挑战、witness和proof，不复用旧验证结论。
+不支持通过调整阈值、搜索seed、修改upload或放宽容差让案例通过。
+
+流程：batch承诺登记 → 服务器KeyGen/挑战 → 客户端Compute/Prove → 服务器Verify
+→ 单次验收与负例审计。Verify仅使用服务器VK和预期公开输入，不读私有batch/witness
+或ground-truth角色。完整前向/反向训练关系绑定原upload全部7850个坐标。
+
+每次输出到 `stage2_jsnark_libsnark/runs/jsnark_seed..._client..._<uuid>/`。
+`report.json: PASS` 须包括真实native证明、Verify、负例和哈希检查全部通过；
+构建成功、functional transcript检查或旧证明不能冒充成功。该目录含敏感batch、
+witness和大体积密钥，**不可上传**。
+
+三个案例应顺序运行，避免内存叠加；建议至少16GB RAM、30GB空闲磁盘。
+每例含独立KeyGen、Compute/Prove/Verify及负例检查，耗时依硬件变化。
+
+## 4. 一致性与边界
+
+- 同环境固定ML seed应得到相同Stage-1输入/数值和ZKP验收结论；证明、salt、nonce、
+  keys使用新鲜密码学随机数，其文件内容、运行ID、耗时和文件大小不要求完全一致。
+- Java/jsnark/libsnark工具链与论文描述对齐，不代表恢复了原作者源码/全部参数。
+  Groth16/ALT_BN128、依赖版本、固定点Q=2^30、近似与误差界、承诺编码和本地trusted
+  setup仍为工程选择；没有独立审计的多方setup。
+- 电路证明固定点近似训练关系，不是PyTorch/IEEE-754逐位证明。数值约束与已验证版本
+  保持不变；单个已执行batch使随机batch选择退化为单候选。
+- 承诺/nonce不证明远端数据来源、历史执行时间或从未复用计算/witness。
+- 三个honest误报恢复案例不等于750次attacker或全部suspicious已通过Stage 2，
+  不构成完整两阶段指标、完整消融或历史论文表格执行证据。
+
+更多说明见 [新Stage-2说明](stage2_jsnark_libsnark/README.md)。
+保留旧后端可运行入口：`python stage2_zkp_single_client/run_paper_aligned.py --seed 20260923 --client-id 30`；
+旧后端需要额外工具/CRS，见其说明。
+
+不训练/不生成证明的检查：
 
 ```powershell
-python run_demo.py all
+python -m unittest discover -s tests -v
+python stage2_jsnark_libsnark/test_source_contract.py
 ```
 
-以上“all”是**本仓库已实现的三个honest恢复案例**，不是全体753次suspicious判定。
-
-| Seed | Client | 预期Stage-1 cosine | 预期Stage-2结论 |
-| --- | --- | --- | --- |
-| 20260923 | 30 | -0.050070902207898574 | 真实证明接受，恢复benign |
-| 20260925 | 1 | 0.027141515101994963 | 同上 |
-| 20260938 | 26 | 0.09136296941406738 | 同上 |
-
-每个案例重新执行原Stage 1来捕获其实际batch/模型/更新，不是导入旧结果伪造证据。
-无须先生成30-run结果也可以运行Stage 2；如果本机已有同协议summary，则额外核对。
-如果选定客户端不再是自然误报，停止，不搜索seed、不调threshold、不放宽容差。
-
-流程：登记batch承诺 -> 服务器KeyGen -> 服务器新鲜挑战 -> 客户端Compute/Prove
--> 服务器Verify -> 负例检查。服务器以自己保存的模型、原上传更新、承诺、挑战和VK
-验收；验证不读取ground-truth角色或`training_executed`。
-
-每次独立输出：`stage2_zkp_single_client/runs/paper_v2_seed..._client..._<id>/`。
-其中`report.json`、`public/proof.json`、`public/verification.json`、
-`public/negative_tests.json`保存真实运行证据；`client_private/`不可公开上传。
-所有阶段成功、真实验证通过、负例通过、文件哈希一致后才写`report.json: PASS`。
-
-首次每个案例需独立编译/密钥准备，已测环境约一小时/案例，非秒级实验。
-单案例密钥阶段可能占约8-9GiB内存，并产生数GB临时文件；三个案例请顺序执行，
-预留充足磁盘（例如40GB），避免系统休眠。实际耗时随硬件/内存压力变化。
-
-## 4. 一致性的边界
-
-- 固定ML seed控制划分、初始化、batch shuffle、攻击者IDs和伪造更新。
-- Proof、salt、nonce和setup贡献使用新鲜密码学随机数；**proof/key文件、承诺、
-  运行目录、耗时和文件大小不要求逐字节一致**。应核对Stage-1数值和ZKP接受/拒绝结论。
-- 电路证明固定点近似训练关系，绑定原上传更新的全部7850个坐标，并有固定容差；
-  不是PyTorch/IEEE-754逐位证明，工程误差界限不是论文参数。
-- 本地只有一个已执行batch，随机抽查候选集只有一个；没有多batch抽查覆盖率证据。
-- 承诺不证明远端数据来源/所有权，nonce不证明历史执行时间或禁止witness复用。
-- 使用Circom/snarkjs/Groth16，不是论文声称的Java/jsnark/libsnark后端复现。
-- 三个honest恢复案例不等于全部suspicious经过Stage 2；750次attacker判定尚无
-  本仓库实验的全量ZKP证据。不得声称完整两阶段指标、消融或历史论文表格已复现。
-
-详细数值关系与安全假设见`stage2_zkp_single_client/paper_aligned/README.md`。
-协议单元测试：`python -m unittest discover -s tests -v`（不下载MNIST、不生成证明）。
+只读核对新后端完成结果：`python stage2_jsnark_libsnark/verify_run.py "<NEW_RUN_DIRECTORY>"`。
